@@ -12,6 +12,13 @@ import org.apache.commons.lang3.StringUtils;
 import org.springframework.context.annotation.Scope;
 import org.springframework.stereotype.Component;
 
+
+
+import com.mongodb.MongoClient;
+import com.mongodb.MongoClientOptions;
+import com.mongodb.MongoClientURI;
+import com.mongodb.MongoCredential;
+import com.mongodb.ServerAddress;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -217,61 +224,91 @@ class MongoModel {
     private String keyStorePassword;
 
     public boolean testConnection() {
-        List<MongoCredential> credentials = new ArrayList<>();
-        MongoClientOptions.Builder builder = MongoClientOptions.builder();
         MongoClient mongo = null;
+
         try {
-            if ((username == null) || (password == null) || (authMechanism == null)) {
-                mongo = new MongoClient(host);
-                this.mongoDb = mongo.getDB(database);
+            String targetDatabase = database == null ? "" : database.trim();
+            String connectionUri = uri == null ? "" : uri.trim();
+
+            if (!connectionUri.isEmpty()) {
+                // Let the MongoDB driver parse the URI, including credentials,
+                // options, and host information.
+                MongoClientURI mongoURI = new MongoClientURI(connectionUri);
+                mongo = new MongoClient(mongoURI);
+
+                if (targetDatabase.isEmpty()) {
+                    targetDatabase = mongoURI.getDatabase();
+                }
             } else {
-                List<ServerAddress> seeds = new ArrayList<>();
-                seeds.add(new ServerAddress(host));
-                if (authMechanism.equalsIgnoreCase("MongoCR")) {
-                    credentials.add(MongoCredential.createMongoCRCredential(username, database, password.toCharArray()));
-                } else if (authMechanism.equalsIgnoreCase("ScramSha1")) {
-                    credentials.add(MongoCredential.createScramSha1Credential(username, database, password.toCharArray()));
-                } else if (authMechanism.equalsIgnoreCase("Plain")) {
-                    credentials.add(MongoCredential.createPlainCredential(username, database, password.toCharArray()));
-                } else {
-                    credentials.add(MongoCredential.createCredential(username, database, password.toCharArray()));
+                // Host and database are mandatory for a direct connection.
+                if (host == null || host.trim().isEmpty()
+                        || targetDatabase.isEmpty()) {
+                    return false;
                 }
-                if (ssl != null) {
-                    if (notNullOrBlank(keyStorePassword)) {
-                        System.setProperty("jakarta.net.ssl.trustStore", keyStorePath);
-                        System.setProperty("jakarta.net.ssl.trustStorePassword", keyStorePassword);
-                    }
-                    builder.sslEnabled(true).sslInvalidHostNameAllowed(true).build();
-                }
-                if (timeout > 0 && maxWait > 0) {
+
+                MongoClientOptions.Builder builder =
+                        MongoClientOptions.builder();
+
+                if (timeout > 0) {
                     builder.connectTimeout(timeout);
+                }
+
+                if (maxWait > 0) {
                     builder.maxWaitTime(maxWait);
                 }
+
                 builder.socketKeepAlive(true);
-                MongoClientOptions mongoClientOptions = builder.build();
-                if (uri != null && uri.length() > 0) {
-                    MongoClientURI mongoURI = new MongoClientURI(uri);
-                    mongo = new MongoClient(mongoURI);
+
+                if (username != null && !username.trim().isEmpty()
+                        && password != null) {
+                    MongoCredential credential;
+
+                    if ("MongoCR".equalsIgnoreCase(authMechanism)) {
+                        credential = MongoCredential.createMongoCRCredential(
+                                username, targetDatabase, password.toCharArray());
+                    } else if ("ScramSha1".equalsIgnoreCase(authMechanism)) {
+                        credential = MongoCredential.createScramSha1Credential(
+                                username, targetDatabase, password.toCharArray());
+                    } else if ("Plain".equalsIgnoreCase(authMechanism)) {
+                        credential = MongoCredential.createPlainCredential(
+                                username, targetDatabase, password.toCharArray());
+                    } else {
+                        credential = MongoCredential.createCredential(
+                                username, targetDatabase, password.toCharArray());
+                    }
+
+                    mongo = new MongoClient(
+                            new ServerAddress(host),
+                            credential,
+                            builder.build());
                 } else {
-                    mongo = new MongoClient(seeds, credentials, mongoClientOptions);
+                    mongo = new MongoClient(
+                            new ServerAddress(host),
+                            builder.build());
                 }
-                if (database.isEmpty()) {
-                    database = uri.substring(uri.lastIndexOf("/"));
-                }
-                this.mongoDb = mongo.getDB(database);
-
-                mongo.getAddress();
-                return this.mongoDb != null;
             }
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        } finally {
 
+            if (targetDatabase == null || targetDatabase.trim().isEmpty()) {
+                return false;
+            }
+
+            // Verify that the server actually responds to a database command.
+            DB databaseHandle = mongo.getDB(targetDatabase);
+            databaseHandle.command("ping");
+
+            this.mongoDb = databaseHandle;
+            return true;
+
+        } catch (Exception e) {
+            // The caller converts false into the application's connection
+            // failure response. Do not expose credentials in error messages.
+            return false;
+        } finally {
             if (mongo != null) {
                 mongo.close();
             }
         }
-        return false;
+
     }
 
     private boolean notNullOrBlank(String trustStorePassword) {
